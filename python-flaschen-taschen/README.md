@@ -53,6 +53,40 @@ For the *`topic`*, I use something like `shairport-sync/SS_HOSTNAME`
 -	`SS_HOSTNAME` is name of server where `shairport-sync` is running
 -	Note, there is **no** leading slash ('`/`') in the `topic` string
 
+### Optional Spotify Canvas mode
+
+Canvas mode keeps the normal AirPlay artwork as its fallback. The AirPlay cover
+is displayed immediately; it is replaced only when Spotify matches the track and
+returns a working Canvas video. Match failures, tracks without Canvas, expired
+credentials, network errors, and video errors leave the cover on screen.
+
+Spotify does not provide a supported Canvas API. This integration uses
+undocumented endpoints and may stop working or be inconsistent with Spotify's
+terms. Canvas media remains owned by its rights holder.
+
+1. Ensure `ffmpeg` is installed.
+2. Set `canvas.mode` to `canvas` in `config.yaml`.
+3. Put the Spotify `sp_dc` cookie in the `SPOTIFY_SP_DC` environment variable.
+   It is an account credential: never commit it, print it, or put it in the YAML.
+4. Restart the service.
+
+For systemd, use a protected environment file:
+
+```ini
+# /etc/shairport-sync-canvas.env (mode 0600)
+SPOTIFY_SP_DC=replace-with-cookie
+```
+
+Add an override with `sudo systemctl edit shairport-mqtt-client.service`:
+
+```ini
+[Service]
+EnvironmentFile=/etc/shairport-sync-canvas.env
+```
+
+To restore the original behavior, set `canvas.mode` to `cover` and restart. No
+Spotify requests or video playback occur in cover mode.
+
 Testing
 -------
 

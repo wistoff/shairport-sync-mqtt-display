@@ -18,6 +18,16 @@ flaschen:
   led-rows: 32
   led-columns: 32
 
+# Optional Spotify Canvas playback. The AirPlay cover is always shown first and
+# remains on screen whenever no Canvas is found or any Spotify request fails.
+canvas:
+  mode: cover                 # "cover" (original behaviour) or "canvas"
+  cookie-env: SPOTIFY_SP_DC   # keep the sp_dc cookie in the environment
+  fps: 8                      # capped at 20 to protect small devices
+  fit: cover                  # "cover" crops to square; "contain" adds bars
+  lookup-delay: 1.0
+  max-download-mb: 20
+
 # ---
 # mqtt:
 #   topic: 'shairport-sync/name'
