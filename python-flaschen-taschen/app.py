@@ -18,6 +18,7 @@ from yaml import safe_load
 from PIL import Image, ImageDraw
 
 import flaschen
+from display_transition import DisplayTransition
 from spotify_canvas import SpotifyCanvasClient, SpotifyCanvasError
 
 
@@ -50,6 +51,14 @@ FLASCHEN_PORT = FLASCHEN_CONF.get("port", 1337)
 FLASCHEN_ROWS = FLASCHEN_CONF.get("led-rows", 32)
 FLASCHEN_COLS = FLASCHEN_CONF.get("led-columns", 32)
 FLASCHEN_SIZE = (FLASCHEN_COLS, FLASCHEN_ROWS)
+
+DISPLAY_CONF = config.get("display", {})
+DISPLAY_TRANSITION_SECONDS = max(
+    0.0, min(float(DISPLAY_CONF.get("transition-seconds", 0.45)), 2.0)
+)
+DISPLAY_TRANSITION_FPS = max(
+    1.0, min(float(DISPLAY_CONF.get("transition-fps", 20)), 30.0)
+)
 
 CANVAS_CONF = config.get("canvas", {})
 CANVAS_MODE = str(CANVAS_CONF.get("mode", "cover")).lower()
@@ -127,26 +136,48 @@ def overlay_volume_bar(image, volume: int):
     return image
 
 
-def display_image(image):
-    """Remember a clean frame and display it with any active volume overlay."""
-    SAVED_INFO["display_frame"] = image
+def _send_display_output(image):
     if volume_overlay_percent is not None and time.monotonic() < volume_overlay_until:
         image = overlay_volume_bar(image.copy(), volume_overlay_percent)
     flaschenSendThumbnailImage(flaschen_client, image)
 
 
+display_transition = DisplayTransition(
+    _send_display_output,
+    FLASCHEN_SIZE,
+    duration=DISPLAY_TRANSITION_SECONDS,
+    fps=DISPLAY_TRANSITION_FPS,
+)
+
+
+def display_image(image):
+    """Show an animation frame immediately, cancelling any stale transition."""
+    display_transition.show(image)
+
+
+def transition_display(image, *, cancel_event=None):
+    return display_transition.crossfade(image, cancel_event=cancel_event)
+
+
+def transition_display_async(image):
+    thread = threading.Thread(target=transition_display, args=(image,), daemon=True)
+    thread.start()
+
+
 def clear_volume_bar():
     global volume_overlay_percent
     volume_overlay_percent = None
-    image = SAVED_INFO.get("display_frame") or SAVED_INFO.get("cover_art", {}).get("data")
+    image = display_transition.snapshot()
     if image:
         flaschenSendThumbnailImage(flaschen_client, image)
 
 
 def clear_display():
+    global display_clear_timer
     canvas_controller.stop()
-    image = Image.new("RGBA", FLASCHEN_SIZE, (0, 0, 0, 0))
-    flaschenSendThumbnailImage(flaschen_client, image)
+    display_clear_timer = None
+    image = Image.new("RGBA", FLASCHEN_SIZE, (0, 0, 0, 255))
+    transition_display(image)
 
 
 def createMatrixImage(fileobj):
@@ -331,10 +362,17 @@ class CanvasController:
                 raise RuntimeError("FFmpeg returned an incomplete Canvas")
             print(f"Canvas: decoded {frame_count} frames; starting low-CPU loop")
 
+            first_frame = Image.frombytes(
+                "RGB", FLASCHEN_SIZE, decoded[:frame_bytes]
+            ).convert("RGBA")
+            if not transition_display(first_frame, cancel_event=stop_event):
+                return
+
             frame_interval = 1.0 / CANVAS_FPS
-            next_frame = time.monotonic()
+            next_frame = time.monotonic() + frame_interval
+            first_index = 1
             while self._still_current(generation, stop_event):
-                for index in range(frame_count):
+                for index in range(first_index, frame_count):
                     if not self._still_current(generation, stop_event):
                         return
                     wait = next_frame - time.monotonic()
@@ -346,6 +384,7 @@ class CanvasController:
                     ).convert("RGBA")
                     display_image(image)
                     next_frame = max(next_frame + frame_interval, time.monotonic())
+                first_index = 0
         except subprocess.TimeoutExpired:
             process.kill()
             process.communicate()
@@ -380,6 +419,20 @@ def _metadata_text(payload):
     return "" if value == "--" else value
 
 
+def _current_track_key():
+    title = SAVED_INFO.get("title")
+    artist = SAVED_INFO.get("artist")
+    return (title, artist) if title and artist else None
+
+
+def _cancel_display_clear():
+    global display_clear_timer
+    if display_clear_timer is not None:
+        display_clear_timer.cancel()
+        display_clear_timer = None
+    display_transition.cancel()
+
+
 def on_message(client, userdata, message, properties=None):
     global volume_clear_timer, display_clear_timer
     global volume_overlay_percent, volume_overlay_until
@@ -391,29 +444,49 @@ def on_message(client, userdata, message, properties=None):
         value = _metadata_text(payload)
         if SAVED_INFO.get(name) != value:
             SAVED_INFO[name] = value
+            _cancel_display_clear()
             canvas_controller.metadata_changed()
 
     elif topic == _form_subtopic_topic("cover"):
-        # Shairport uses "--" for metadata events with no binary artwork.
-        # Keep the current frame until the actual cover arrives.
-        if payload == b"--":
+        # Empty and "--" payloads mean artwork is absent or still pending. Keep
+        # the current visual rather than flashing the default placeholder.
+        if not payload or payload == b"--":
             return
+        try:
+            image = createMatrixImage(io.BytesIO(payload))
+        except Exception as error:
+            print(f"Ignoring invalid cover art; keeping current frame: {error}")
+            return
+
+        track_key = _current_track_key()
+        session = SAVED_INFO.get("session", 0)
+        previous_cover = SAVED_INFO.get("cover_art", {})
+        if (
+            track_key is not None
+            and previous_cover.get("track_key") == track_key
+            and previous_cover.get("session") == session
+        ):
+            return
+
+        _cancel_display_clear()
         canvas_controller.cover_changed()
-        if payload:
-            try:
-                image = createMatrixImage(io.BytesIO(payload))
-            except Exception as error:
-                print(f"Invalid cover art, using default: {error}")
-                image = DEFAULT_IMAGE
-        else:
-            image = DEFAULT_IMAGE
-        SAVED_INFO["cover_art"] = {"data": image}
-        display_image(image)
-        if display_clear_timer is not None:
-            display_clear_timer.cancel()
+        SAVED_INFO["cover_art"] = {
+            "data": image,
+            "track_key": track_key,
+            "session": session,
+        }
+        transition_display_async(image)
+
+    elif topic in (
+        _form_subtopic_topic("active_start"),
+        _form_subtopic_topic("play_start"),
+        _form_subtopic_topic("play_resume"),
+    ):
+        _cancel_display_clear()
 
     elif topic == _form_subtopic_topic("active_end"):
         canvas_controller.stop()
+        SAVED_INFO["session"] = SAVED_INFO.get("session", 0) + 1
         if display_clear_timer is not None:
             display_clear_timer.cancel()
         display_clear_timer = threading.Timer(DISPLAY_CLEAR_TIMEOUT, clear_display)
@@ -432,7 +505,7 @@ def on_message(client, userdata, message, properties=None):
             0, min(100, int((volume_db - min_db) / (max_db - min_db) * 100))
         )
         volume_overlay_until = time.monotonic() + VOLUME_BAR_TIMEOUT
-        image = SAVED_INFO.get("display_frame") or SAVED_INFO.get("cover_art", {}).get("data")
+        image = display_transition.snapshot()
         if image:
             flaschenSendThumbnailImage(
                 flaschen_client, overlay_volume_bar(image.copy(), volume_overlay_percent)

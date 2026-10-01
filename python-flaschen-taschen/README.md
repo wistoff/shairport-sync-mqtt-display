@@ -53,6 +53,21 @@ For the *`topic`*, I use something like `shairport-sync/SS_HOSTNAME`
 -	`SS_HOSTNAME` is name of server where `shairport-sync` is running
 -	Note, there is **no** leading slash ('`/`') in the `topic` string
 
+### Smooth display transitions
+
+Cover changes, the first Canvas frame, and inactivity clearing use a cancellable
+crossfade. Missing or placeholder artwork keeps the current frame, and duplicate
+cover messages for the current track are ignored so Canvas is not restarted.
+Configure the transition independently of Canvas:
+
+```yaml
+display:
+  transition-seconds: 0.45
+  transition-fps: 20
+```
+
+Set `transition-seconds` to `0` for immediate changes.
+
 ### Optional Spotify Canvas mode
 
 Canvas mode keeps the normal AirPlay artwork as its fallback. The AirPlay cover

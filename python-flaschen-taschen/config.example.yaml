@@ -18,6 +18,11 @@ flaschen:
   led-rows: 32
   led-columns: 32
 
+# Smooth cover, Canvas, and display-clear changes.
+display:
+  transition-seconds: 0.45
+  transition-fps: 20
+
 # Optional Spotify Canvas playback. The AirPlay cover is always shown first and
 # remains on screen whenever no Canvas is found or any Spotify request fails.
 canvas:
