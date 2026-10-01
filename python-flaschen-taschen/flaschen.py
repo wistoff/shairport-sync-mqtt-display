@@ -63,6 +63,23 @@ class Flaschen(object):
     self._data[offset + 1] = color[1]
     self._data[offset + 2] = color[2]
   
+  def send_rgb(self, data):
+    '''Replace and send a complete row-major RGB frame efficiently.'''
+    expected = self.width * self.height * 3
+    if len(data) != expected:
+      raise ValueError("RGB frame has %d bytes; expected %d" % (len(data), expected))
+
+    # Preserve set() semantics: opaque clients encode true black as (1, 1, 1).
+    frame = bytearray(data)
+    if not self.transparent:
+      for offset in range(0, expected, 3):
+        if frame[offset] == 0 and frame[offset + 1] == 0 and frame[offset + 2] == 0:
+          frame[offset:offset + 3] = b'\x01\x01\x01'
+
+    start = self._header_len
+    self._data[start:start + expected] = frame
+    self.send()
+
   def send(self):
     '''Send the updated pixels to the display.'''
     self._sock.send(self._data)

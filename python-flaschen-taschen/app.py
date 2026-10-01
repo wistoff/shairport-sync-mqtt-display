@@ -97,12 +97,9 @@ def _form_subtopic_topic(subtopic):
 
 def flaschenSendThumbnailImage(client, image):
     """Send one complete frame without interleaving concurrent writers."""
+    frame = image.convert("RGB").tobytes()
     with DISPLAY_LOCK:
-        for x in range(FLASCHEN_COLS):
-            for y in range(FLASCHEN_ROWS):
-                color = image.getpixel((x, y))
-                client.set(x, y, (color[0], color[1], color[2]))
-        client.send()
+        client.send_rgb(frame)
 
 
 def overlay_volume_bar(image, volume: int):
@@ -294,50 +291,68 @@ class CanvasController:
                 print(f"Canvas unavailable; keeping cover art: {error}")
 
     def _play(self, filename, generation, stop_event):
+        """Decode one short Canvas into memory, then loop it without FFmpeg."""
         width, height = FLASCHEN_SIZE
         if CANVAS_FIT == "contain":
             video_filter = (
+                f"fps={CANVAS_FPS},"
                 f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black,fps={CANVAS_FPS}"
+                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:black"
             )
         else:
             video_filter = (
+                f"fps={CANVAS_FPS},"
                 f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height},fps={CANVAS_FPS}"
+                f"crop={width}:{height}"
             )
         command = [
-            "ffmpeg", "-nostdin", "-loglevel", "error", "-stream_loop", "-1",
-            "-i", filename, "-an", "-vf", video_filter,
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-threads", "1",
+            "-i", filename, "-an", "-t", "15", "-vf", video_filter,
             "-f", "rawvideo", "-pix_fmt", "rgb24", "pipe:1",
         ]
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         with self.lock:
             if not self._still_current(generation, stop_event):
                 process.terminate()
                 os.unlink(filename)
                 return
             self.process = process
-        frame_bytes = width * height * 3
-        frame_interval = 1.0 / CANVAS_FPS
-        next_frame = time.monotonic()
         try:
+            decoded, error_output = process.communicate(timeout=30)
+            if process.returncode != 0:
+                detail = error_output.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(f"FFmpeg decode failed: {detail}")
+            if not self._still_current(generation, stop_event):
+                return
+
+            frame_bytes = width * height * 3
+            frame_count = len(decoded) // frame_bytes
+            if frame_count == 0 or len(decoded) % frame_bytes:
+                raise RuntimeError("FFmpeg returned an incomplete Canvas")
+            print(f"Canvas: decoded {frame_count} frames; starting low-CPU loop")
+
+            frame_interval = 1.0 / CANVAS_FPS
+            next_frame = time.monotonic()
             while self._still_current(generation, stop_event):
-                frame = process.stdout.read(frame_bytes)
-                if len(frame) != frame_bytes:
-                    break
-                wait = next_frame - time.monotonic()
-                if wait > 0 and stop_event.wait(wait):
-                    break
-                image = Image.frombytes("RGB", FLASCHEN_SIZE, frame).convert("RGBA")
-                display_image(image)
-                next_frame = max(next_frame + frame_interval, time.monotonic())
+                for index in range(frame_count):
+                    if not self._still_current(generation, stop_event):
+                        return
+                    wait = next_frame - time.monotonic()
+                    if wait > 0 and stop_event.wait(wait):
+                        return
+                    start = index * frame_bytes
+                    image = Image.frombytes(
+                        "RGB", FLASCHEN_SIZE, decoded[start:start + frame_bytes]
+                    ).convert("RGBA")
+                    display_image(image)
+                    next_frame = max(next_frame + frame_interval, time.monotonic())
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.communicate()
+            raise RuntimeError("FFmpeg Canvas decode timed out")
         finally:
             if process.poll() is None:
                 process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
             try:
                 os.unlink(filename)
             except FileNotFoundError:
@@ -379,6 +394,10 @@ def on_message(client, userdata, message, properties=None):
             canvas_controller.metadata_changed()
 
     elif topic == _form_subtopic_topic("cover"):
+        # Shairport uses "--" for metadata events with no binary artwork.
+        # Keep the current frame until the actual cover arrives.
+        if payload == b"--":
+            return
         canvas_controller.cover_changed()
         if payload:
             try:
