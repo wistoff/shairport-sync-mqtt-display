@@ -155,12 +155,19 @@ def display_image(image):
     display_transition.show(image)
 
 
-def transition_display(image, *, cancel_event=None):
-    return display_transition.crossfade(image, cancel_event=cancel_event)
+def transition_display(image, *, cancel_event=None, kind=None):
+    return display_transition.crossfade(
+        image, cancel_event=cancel_event, kind=kind
+    )
 
 
 def transition_display_async(image):
-    thread = threading.Thread(target=transition_display, args=(image,), daemon=True)
+    thread = threading.Thread(
+        target=transition_display,
+        args=(image,),
+        kwargs={"kind": "cover"},
+        daemon=True,
+    )
     thread.start()
 
 
@@ -177,7 +184,7 @@ def clear_display():
     canvas_controller.stop()
     display_clear_timer = None
     image = Image.new("RGBA", FLASCHEN_SIZE, (0, 0, 0, 255))
-    transition_display(image)
+    transition_display(image, kind="clear")
 
 
 def createMatrixImage(fileobj):
@@ -365,7 +372,9 @@ class CanvasController:
             first_frame = Image.frombytes(
                 "RGB", FLASCHEN_SIZE, decoded[:frame_bytes]
             ).convert("RGBA")
-            if not transition_display(first_frame, cancel_event=stop_event):
+            if not transition_display(
+                first_frame, cancel_event=stop_event, kind="canvas"
+            ):
                 return
 
             frame_interval = 1.0 / CANVAS_FPS
@@ -430,7 +439,7 @@ def _cancel_display_clear():
     if display_clear_timer is not None:
         display_clear_timer.cancel()
         display_clear_timer = None
-    display_transition.cancel()
+    display_transition.cancel(kind="clear", restore=True)
 
 
 def on_message(client, userdata, message, properties=None):

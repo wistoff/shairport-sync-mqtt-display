@@ -28,20 +28,38 @@ class DisplayTransition:
         self._lock = threading.RLock()
         self._generation = 0
         self._current = None
+        self._active_kind = None
+        self._transition_start = None
 
     def snapshot(self) -> Image.Image | None:
         with self._lock:
             return self._current.copy() if self._current is not None else None
 
-    def cancel(self):
+    def cancel(self, *, kind: str | None = None, restore: bool = False) -> bool:
+        """Cancel the active transition, optionally only if its kind matches.
+
+        Restoring is useful for an interrupted display-clear fade: playback can
+        return to the stable frame that was visible before clearing began.
+        """
         with self._lock:
+            if kind is not None and self._active_kind != kind:
+                return False
             self._generation += 1
+            previous = self._transition_start if restore else None
+            self._active_kind = None
+            self._transition_start = None
+            if previous is not None:
+                self._current = previous.copy()
+                self._send(self._current)
+            return True
 
     def show(self, image: Image.Image):
         """Cancel any transition and show a frame immediately."""
         frame = self._prepare(image)
         with self._lock:
             self._generation += 1
+            self._active_kind = None
+            self._transition_start = None
             self._current = frame
             self._send(frame)
 
@@ -51,6 +69,7 @@ class DisplayTransition:
         *,
         duration: float | None = None,
         cancel_event: threading.Event | None = None,
+        kind: str | None = None,
     ) -> bool:
         """Crossfade to image; return False if superseded or cancelled."""
         target = self._prepare(image)
@@ -64,9 +83,12 @@ class DisplayTransition:
             start = self._current.copy() if self._current is not None else Image.new(
                 "RGBA", self._size, (0, 0, 0, 255)
             )
+            self._active_kind = kind
+            self._transition_start = start.copy()
 
         for step in range(1, steps + 1):
             if cancel_event is not None and cancel_event.is_set():
+                self._finish(generation)
                 return False
             frame = Image.blend(start, target, step / steps)
             with self._lock:
@@ -75,8 +97,16 @@ class DisplayTransition:
                 self._current = frame
                 self._send(frame)
             if step < steps and self._wait_for(interval, cancel_event):
+                self._finish(generation)
                 return False
+        self._finish(generation)
         return True
+
+    def _finish(self, generation):
+        with self._lock:
+            if generation == self._generation:
+                self._active_kind = None
+                self._transition_start = None
 
     def _prepare(self, image: Image.Image) -> Image.Image:
         frame = image.convert("RGBA")

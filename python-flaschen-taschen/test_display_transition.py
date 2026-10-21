@@ -69,6 +69,60 @@ class DisplayTransitionTests(unittest.TestCase):
         self.assertEqual(len(sent), 1)
         self.assertEqual(display.snapshot().getpixel((0, 0)), (50, 0, 0, 255))
 
+    def test_unrelated_named_cancel_does_not_interrupt_cover_transition(self):
+        sent = []
+        display = None
+
+        def metadata_arrived(_):
+            display.cancel(kind="clear", restore=True)
+            return False
+
+        display = DisplayTransition(
+            lambda image: sent.append(image.copy()),
+            (1, 1),
+            duration=1,
+            fps=2,
+            wait=metadata_arrived,
+        )
+        display.show(Image.new("RGBA", (1, 1), (0, 0, 0, 255)))
+        sent.clear()
+
+        completed = display.crossfade(
+            Image.new("RGBA", (1, 1), (200, 200, 200, 255)),
+            kind="cover",
+        )
+
+        self.assertTrue(completed)
+        self.assertEqual(display.snapshot().getpixel((0, 0)), (200, 200, 200, 255))
+
+    def test_named_cancel_restores_frame_before_clear(self):
+        sent = []
+        display = None
+
+        def playback_resumed(_):
+            display.cancel(kind="clear", restore=True)
+            return False
+
+        display = DisplayTransition(
+            lambda image: sent.append(image.copy()),
+            (1, 1),
+            duration=1,
+            fps=2,
+            wait=playback_resumed,
+        )
+        cover = Image.new("RGBA", (1, 1), (200, 100, 50, 255))
+        display.show(cover)
+        sent.clear()
+
+        completed = display.crossfade(
+            Image.new("RGBA", (1, 1), (0, 0, 0, 255)),
+            kind="clear",
+        )
+
+        self.assertFalse(completed)
+        self.assertEqual(display.snapshot().getpixel((0, 0)), (200, 100, 50, 255))
+        self.assertEqual(sent[-1].getpixel((0, 0)), (200, 100, 50, 255))
+
     def test_immediate_show_supersedes_transition(self):
         sent = []
         display = None
